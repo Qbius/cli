@@ -1,5 +1,5 @@
 from sys        import argv
-from os         import mkdir, environ, remove
+from os         import mkdir, environ, remove, name as osname
 from os.path    import join, exists, basename, splitext
 from argparse   import ArgumentParser
 from inspect    import signature, _empty, Parameter
@@ -11,7 +11,7 @@ from pyfiglet    import Figlet
 class info:
     progname = splitext(basename(argv[0]))[0]
     description = ''
-    app_data_dir = join(environ['APPDATA'], progname)
+    app_data_dir = join(environ['APPDATA'], progname) if osname == 'nt' else join(environ['HOME'], '.config', progname)
 
 if not exists(info.app_data_dir): 
     mkdir(info.app_data_dir)
@@ -63,6 +63,16 @@ class positional:
         self.type = arg_type
         self.allowed = allowed
 
+    def parse_arg(self, param):
+        cmd_names = [param.name]
+        kwargs = {'type': self.type}
+        if param.kind == Parameter.VAR_POSITIONAL: 
+            kwargs['nargs'] = '+'
+            kwargs['help'] = '(Multiple arguments)'
+        if self.default != _empty: kwargs['default'] = self.default
+        if self.allowed != _empty: kwargs['choices'] = self.allowed
+        return cmd_names, kwargs
+
 class option:
     def __init__(self, /, *, arg_count = '?', alias = None, default = _empty, arg_type = str):
         self.arg_count = '*' if isinstance(arg_count, int) and arg_count < 0 else arg_count
@@ -70,39 +80,36 @@ class option:
         self.default = default
         self.type = arg_type
 
+    def parse_arg(self, param):
+        cmd_names = [f'--{param.name}', f'-{self.alias}'] if self.alias else [f'--{param.name}']
+        kwargs = {'nargs': self.arg_count, 'type': self.type, 'dest': param.name}
+        if self.default != _empty:
+            kwargs['default'] = self.default
+            kwargs['metavar'] = f'{cmd_names[0].lstrip("-").upper()} (default: {self.default})'
+        return cmd_names, kwargs
+
 class switch:
     def __init__(self, /, *, alias = None):
         self.alias = alias
 
+    def parse_arg(self, param):
+        cmd_names = [f'--{param.name}', f'-{self.alias}'] if self.alias else [f'--{param.name}']
+        kwargs = {'action': 'store_true', 'default': False, 'dest': param.name}
+        return cmd_names, kwargs
+
+def get_param_type(param):
+    annotation = param._annotation
+    if annotation == _empty: return positional()
+    elif hasattr(annotation, 'parse_args'): return annotation
+    else: return annotation()
+
 available_commands = {}
 def command(desc, /):
     def decorator(f):
-        baked_args = []
         params = f.__params__ if hasattr(f, '__params__') else signature(f).parameters.values()
-        for param in params:
-            cmd_names = ""
-            kwargs = {}
+        baked_args = [get_param_type(param).parse_arg(param) for param in params]
 
-            param_specs = positional() if param._annotation == _empty else param._annotation if isinstance(param._annotation, (positional, option, switch)) else param._annotation()
-            if isinstance(param_specs, positional):
-                cmd_names = [param.name]
-                kwargs = {'type': param_specs.type}
-                if param.kind == Parameter.VAR_POSITIONAL: 
-                    kwargs['nargs'] = '+'
-                    kwargs['help'] = '(Multiple arguments)'
-                if param_specs.default != _empty: kwargs['default'] = param_specs.default
-                if param_specs.allowed != _empty: kwargs['choices'] = param_specs.allowed
-            elif isinstance(param_specs, option):
-                cmd_names = [f'--{param.name}', f'-{param_specs.alias}'] if param_specs.alias else [f'--{param.name}']
-                kwargs = {'nargs': param_specs.arg_count, 'type': param_specs.type, 'dest': param.name}
-                if param_specs.default != _empty:
-                    kwargs['default'] = param_specs.default
-                    kwargs['metavar'] = f'{cmd_names[0].lstrip("-").upper()} (default: {param_specs.default})'
-            elif isinstance(param_specs, switch):
-                cmd_names = [f'--{param.name}', f'-{param_specs.alias}'] if param_specs.alias else [f'--{param.name}']
-                kwargs = {'action': 'store_true', 'default': False, 'dest': param.name}
-                
-            baked_args.append((cmd_names, kwargs))
+        global available_commands
         available_commands[f.__name__] = (f, desc, baked_args)
         return f
     return decorator
@@ -147,7 +154,7 @@ def run():
                 kwargs = {}
                 namespace = vars(namespace)
                 for param in params:
-                    param_specs = positional() if param._annotation == _empty else param._annotation if isinstance(param._annotation, (positional, option, switch)) else param._annotation()
+                    param_specs = get_param_type(param)
                     if not isinstance(param_specs, positional):
                         kwargs[param.name] = namespace[param.name]
                     elif isinstance(namespace[param.name], list):
